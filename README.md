@@ -11,6 +11,17 @@ py -m pip install -r requirements.txt
 py -m streamlit run app.py
 ```
 
+## Map tab
+
+The 🗺️ Map tab is a clickable schematic war map: each region is a box (border
+glows in its controller's color, ⭐ = raid region), each square tile is a
+territory colored by its owner (gray = contested; a number on the tile = its
+point value when it isn't the standard 3). Pick a team in the radio, click a
+tile to hand it to them (applies the real capture rule — their count becomes
+strictly highest), or pick "↩️ Revert to live" and click tiles to undo
+experiments. The scoreboard under the map and every other tab update with each
+click, since the map edits the same completion counts as the Board tab.
+
 ## Live data
 
 The app syncs from the stabilisite-backend API **automatically when it opens**:

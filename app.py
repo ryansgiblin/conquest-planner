@@ -97,6 +97,8 @@ PLACES = ["1st", "2nd", "3rd"]
 DEFAULT_API_URL = "https://stability-backend-prototypes-production.up.railway.app"
 DEFAULT_EVENT_ID = "8986ee4e-e5e2-4d55-ad99-b9f26436a14e"
 RAID_REGION_WORDS = ("desert", "morytania", "kourend")
+TEAM_FALLBACK_COLORS = ["#3B82F6", "#EF4444", "#22C55E", "#EAB308"]
+NEUTRAL_COLOR = "#8a8a8a"
 DEFAULT_HRS = 5.0  # hours for live tasks with no name match anywhere
 HOURS_FILE = "hours.json"  # curated {task name: hrs}, committed next to app.py
 
@@ -123,6 +125,7 @@ def init_state():
     ss.setdefault("counts", {tid: [0] * N_TEAMS for tid, *_ in tasks})
     ss.setdefault("hours", {tid: t["hrs"] for tid, _, _, t in tasks})
     ss.setdefault("team_names", ["Team 1", "Team 2", "Team 3", "Team 4"])
+    ss.setdefault("team_colors", list(TEAM_FALLBACK_COLORS))
     ss.setdefault("supers", {s: {p: "—" for p in PLACES} for s in SUPERLATIVES})
     # Incumbent holders from the live event (backend rule: a holder keeps a
     # territory/region until a challenger STRICTLY exceeds them).
@@ -333,6 +336,8 @@ def sync_live(api_url, event_id):
                      + [f"Team {i+1}" for i in range(N_TEAMS)])[:N_TEAMS]
     for i, name in enumerate(SS.team_names):
         SS[f"tn_{i}"] = name  # widget state would otherwise win over the new names
+    SS.team_colors = [(teams_raw[i].get("color") if i < len(teams_raw) else None)
+                      or TEAM_FALLBACK_COLORS[i] for i in range(N_TEAMS)]
     SS.epoch += 1
     return {
         "when": datetime.now().strftime("%H:%M:%S"),
@@ -550,8 +555,119 @@ if SS.live_error:
     st.warning(f"⚠️ Couldn't reach the live API ({SS.live_error}) — showing the "
                "offline draft task list. Use 🛰️ Live data in the sidebar to retry.")
 
-tab_board, tab_score, tab_prio, tab_hours = st.tabs(
-    ["📋 Board", "🏆 Scoreboard", "🎯 Priorities", "⏱️ Task Hours"])
+tab_map, tab_board, tab_score, tab_prio, tab_hours = st.tabs(
+    ["🗺️ Map", "📋 Board", "🏆 Scoreboard", "🎯 Priorities", "⏱️ Task Hours"])
+
+# ---------------------------------------------------------------------------
+# Map tab — clickable schematic war map
+# ---------------------------------------------------------------------------
+
+# Rough OSRS geography: (col, row) cells, row 0 = south. Regions are matched
+# by keyword so live/draft naming differences don't matter.
+_MAP_CELLS = [
+    ("fremennik", (1, 2)), ("misthalin", (2, 2)), ("vampyr", (3, 2)),
+    ("tirannwn", (0, 1)), ("kandarin", (1, 1)), ("karamja", (1, 1)),
+    ("asgarnia", (2, 1)), ("morytania", (3, 1)),
+    ("kourend", (0, 0)), ("varlamore", (1, 0)), ("desert", (2, 0)),
+]
+_SPARE_CELLS = [(3, 0), (0, 2), (4, 1), (4, 0), (4, 2)]
+
+
+def _map_layout():
+    """{region index: (x origin, y origin)} on the map canvas."""
+    used, spare = set(), list(_SPARE_CELLS)
+    cells = {}
+    for ri, region in enumerate(REGIONS):
+        name = region["name"].lower()
+        cell = next((c for kw, c in _MAP_CELLS if kw in name and c not in used), None)
+        if cell is None:
+            cell = spare.pop(0)
+        used.add(cell)
+        cells[ri] = (cell[0] * 7.0, cell[1] * 3.2)
+    return cells
+
+
+def paint_tile(tid, choice):
+    """Apply a map click: revert to live, or give a team the tile (capture rule)."""
+    if choice == "live":
+        SS.counts[tid] = list(SS.base_counts.get(tid, [0] * N_TEAMS))
+    elif scores["owners"][tid] != choice:
+        SS.counts[tid] = list(SS.counts[tid])
+        SS.counts[tid][choice] = max(SS.counts[tid]) + 1
+
+
+with tab_map:
+    import plotly.graph_objects as go
+
+    top = st.columns([3, 2])
+    with top[0]:
+        paint = st.radio(
+            "Clicking a tile assigns it to:", list(range(N_TEAMS)) + ["live"],
+            format_func=lambda o: "↩️ Revert to live" if o == "live" else SS.team_names[o],
+            horizontal=True, key="map_paint")
+    with top[1]:
+        legend = "  ".join(
+            f"<span style='color:{SS.team_colors[i]}'>⬤</span> {SS.team_names[i]}"
+            for i in range(N_TEAMS)) + f"  <span style='color:{NEUTRAL_COLOR}'>⬤</span> contested"
+        st.markdown(legend, unsafe_allow_html=True)
+        st.caption("Tile = territory (click to flip) · box border = region controller")
+
+    layout_xy = _map_layout()
+    xs, ys, colors, texts, hovers, tids = [], [], [], [], [], []
+    fig = go.Figure()
+    for ri, region in enumerate(REGIONS):
+        ox, oy = layout_xy[ri]
+        n = len(region["tasks"])
+        r_owner = scores["region_owners"][ri]
+        r_color = SS.team_colors[r_owner] if r_owner is not None else NEUTRAL_COLOR
+        fig.add_shape(type="rect", x0=ox - 0.7, x1=ox + (n - 1) * 1.2 + 0.7,
+                      y0=oy - 0.75, y1=oy + 0.75,
+                      line={"color": r_color, "width": 3}, opacity=0.9)
+        star = " ⭐" if region["raid"] else ""
+        holder = SS.team_names[r_owner] if r_owner is not None else "contested"
+        fig.add_annotation(x=ox + (n - 1) * 0.6, y=oy + 1.15,
+                           text=f"<b>{region['name']}{star}</b> · {region_pts_value(region)}p · {holder}",
+                           showarrow=False, font={"size": 11, "color": r_color})
+        for ti, t in enumerate(region["tasks"]):
+            tid = task_id(ri, ti)
+            o = scores["owners"][tid]
+            xs.append(ox + ti * 1.2)
+            ys.append(oy)
+            colors.append(SS.team_colors[o] if o is not None else NEUTRAL_COLOR)
+            texts.append(str(task_pts(t)) if task_pts(t) != 3 else "")
+            counts_str = " · ".join(f"{SS.team_names[i]}: {SS.counts[tid][i]}"
+                                    for i in range(N_TEAMS))
+            hovers.append(f"<b>{t['name']}</b> (x{t['qty']}, {task_pts(t)}pts)<br>"
+                          f"owner: {owner_label(o)}<br>{counts_str}")
+            tids.append(tid)
+    fig.add_trace(go.Scatter(
+        x=xs, y=ys, mode="markers+text", text=texts, customdata=tids,
+        marker={"symbol": "square", "size": 34, "color": colors,
+                "line": {"color": "rgba(255,255,255,0.55)", "width": 1}},
+        textfont={"color": "white", "size": 11},
+        hovertext=hovers, hoverinfo="text"))
+    fig.update_layout(
+        height=560, margin={"l": 10, "r": 10, "t": 10, "b": 10},
+        showlegend=False, dragmode=False,
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        xaxis={"visible": False, "fixedrange": True},
+        yaxis={"visible": False, "fixedrange": True, "scaleanchor": "x", "scaleratio": 1.35},
+    )
+
+    event = st.plotly_chart(fig, on_select="rerun", selection_mode=("points",),
+                            key=f"map_{SS.epoch}", config={"displayModeBar": False})
+    points = event.get("selection", {}).get("points", []) if event else []
+    if points:
+        paint_tile(points[0]["customdata"], SS.map_paint)
+        SS.epoch += 1  # remount editors + clear the map selection
+        st.rerun()
+
+    mcols = st.columns(N_TEAMS)
+    order = sorted(range(N_TEAMS), key=lambda i: -scores["total"][i])
+    for rank, i in enumerate(order):
+        with mcols[rank]:
+            st.metric(f"#{rank + 1}  {SS.team_names[i]}", f"{scores['total'][i]} pts",
+                      f"{scores['territories'][i]} territories")
 
 with tab_board:
     st.caption("Enter cumulative **completions** (batches) per team per task. "
